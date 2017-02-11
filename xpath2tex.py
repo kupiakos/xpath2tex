@@ -10,7 +10,7 @@ from lxml import etree
 
 # Typing
 import io
-from typing import Sequence, Mapping, Iterator, Generic, AbstractSet
+from typing import Sequence, Mapping, Iterator, Generic, AbstractSet, Callable
 from typing import Any, List, Tuple, Dict, Generator
 from typing import TypeVar
 from numbers import Number
@@ -38,6 +38,11 @@ KNOWN_FORMATS = {
     'italic': (r'\textit{%s}', False),
     'math': (r'$ %s $', True),
     'bold': (r'\textbf{%s}', False),
+}
+
+SORTING_TRANSFORMS = {
+    'ident': lambda x: x,
+    'ip': lambda x: [int(i) for i in x.split('.')],
 }
 
 logger = logging.getLogger('xpath2tex')
@@ -116,18 +121,19 @@ def format_item(item: str, fmt: str=None, escape: bool=True) -> str:
 
 def format_row(
         cols: Sequence[str],
+        row_style: str='%s',
         col_defaults: Mapping[int, str]={},
         col_formats: Mapping[int, str]={},
         col_escapes: Mapping[int, bool]={},
-        skip_cols: AbstractSet[int]=set(),) -> str:
-    return ' & '.join(
+        skip_cols: AbstractSet[int]=set(),) -> Iterator[str]:
+    yield ' & '.join(
         format_item(
             col or col_defaults.get(n, ''),
             col_formats.get(n),
             col_escapes.get(n, True))
         for n, col in enumerate(cols)
         if n not in skip_cols
-    )
+    ) + r' \\'
 
 
 def enum_rows(
@@ -135,6 +141,7 @@ def enum_rows(
         row_xpath: str,
         col_xpaths: Sequence[str],
         row_style: str='%s',
+        sort_by: Tuple[int, Callable[[str], Any]]=None,
         skip_cols: AbstractSet[int]=set(),
         col_defaults: Mapping[int, str]={},
         col_formats: Mapping[int, str]={},
@@ -142,10 +149,22 @@ def enum_rows(
     row_xpath = XPath(row_xpath)
     col_xpaths = [XPath(i) for i in col_xpaths]
     tree = etree.parse(in_file)
-    for row_element in row_xpath(tree):
-        cols = query_row(row_element, col_xpaths)
-        yield row_style % format_row(
+    row_cols = [
+        query_row(row_element, col_xpaths)
+        for row_element in row_xpath(tree)]
+    if sort_by is not None:
+        col_sort, translate = sort_by
+        if translate is None:
+            translate = SORTING_TRANSFORMS['ident']
+        reverse = col_sort < 0
+        sort_by = abs(col_sort)
+        row_cols.sort(
+                key=lambda cols: translate(ensure_str(cols[col_sort])),
+                reverse=reverse)
+    for cols in row_cols:
+        yield from format_row(
             cols=cols,
+            row_style=row_style,
             col_formats=col_formats,
             col_escapes=col_escapes,
             col_defaults=col_defaults,
@@ -183,7 +202,7 @@ def output_xml(
             skip_cols=skip_cols,
             **kwargs)
         for row in rows:
-            print(row + r' \\', file=out_file)
+            print(row, file=out_file)
     if print_environment:
         print('\\bottomrule\n\\end{tabular}', file=out_file)
 
@@ -244,8 +263,12 @@ def merge_config(current, other):
             current[key] = d
         elif isinstance(val, list):
             current[key] = cval + val
+        elif isinstance(val, set):
+            current[key] = cval | val
         elif isinstance(val, (str, int)):
             logger.warning('Overwriting key %s' % key)
+            current[key] = val
+        else:
             current[key] = val
     return current
 
@@ -263,6 +286,7 @@ def get_config(args):
         'skip_cols': args.skip_cols,
         'row_style': args.row_style,
         'col_names': args.names,
+        'sort_by': args.sort_by,
         'row_aligns': args.align,
         'print_environment': args.print_environment,
     }
@@ -294,6 +318,16 @@ def get_config(args):
     return kwargs
 
 
+def parse_sort(s):
+    parts = s.split(':', 1)
+    if len(parts) == 1:
+        return int(s), None
+    transform = SORTING_TRANSFORMS.get(parts[1])
+    if transform is None:
+        raise ValueError('Sorting transform %s not known' % parts[1])
+    return int(parts[0]), transform
+
+
 def main():
     parser = argparse.ArgumentParser(
             description='Convert XML and XPath expressions to LaTeX tables')
@@ -318,18 +352,18 @@ def main():
             '-d', '--default', action='append', dest='defaults',
             nargs=2, metavar=('COLS', 'TEXT'), default=[],
             help='Set the default value for one or all columns.\n'
-            'COLS := n[,n]')
+            'COLS:=n[,n]')
     parser.add_argument(
             '-n', '--names', type=lambda s: s.split(','),
             help='Names of each of the columns, comma separated')
     parser.add_argument(
             '-f', '--format', action='append', dest='formats', default=[],
             help='Set the format for one or all columns.\n'
-            'format := [n[,n]...:]([!]expr|name)\n'
+            'format:=[n[,n]...:]([!]expr|name).\n'
             'n is one or more columns starting from 0, or all if omitted.\n'
             '! specifies to not escape the column.\n'
-            'expr is a format expression where %s is the data' +
-            'name is one of: %s.\n')
+            'expr is a format expression where %%s is the data' +
+            'name is one of: %s.\n' % ', '.join(KNOWN_FORMATS))
     parser.add_argument(
            '-e', '--print-environment', action='store_true',
             help='Print the tabular environment')
@@ -340,6 +374,12 @@ def main():
             '-s', '--skip-cols', default=[],
             type=lambda s: [int(i) for i in s.split(',')],
             help='Skip the specified columns in the output')
+    parser.add_argument(
+            '--sort-by', type=parse_sort,
+            help='Sort by the column, negative to reverse. '
+            'By appending :func, the value is transformed first. ' +
+            'The current supported transformations are %s' %
+            ', '.join(SORTING_TRANSFORMS))
     args = parser.parse_args()
     kwargs = get_config(args)
     output_xml(**kwargs)
