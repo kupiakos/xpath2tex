@@ -2,6 +2,7 @@
 
 import re
 import sys
+import os
 import argparse
 import logging
 import collections
@@ -152,18 +153,20 @@ def output_xml(
         in_filename: str,
         col_xpaths: Sequence[str],
         out_file: io.TextIOBase=sys.stdout,
-        row_names: Sequence[str]=None,
+        col_names: Sequence[str]=None,
         row_aligns: Sequence[str]=None,
         print_environment: bool=False,
         **kwargs) -> None:
+    if col_xpaths is None:
+        col_xpaths = ['text()']
     if print_environment:
         if row_aligns is None:
             row_aligns = 'l' * len(col_xpaths)
         print(r'\begin{tabular}{%s}\toprule' % row_aligns, file=out_file)
-    if row_names is not None:
+    if col_names is not None:
         print(
             ' & '.join(
-                r'\textbf{%s}' % escape_tex(name) for name in row_names
+                r'\textbf{%s}' % escape_tex(name) for name in col_names
             ) + r'\\\midrule',
             file=out_file)
     with open(in_filename) as f:
@@ -215,6 +218,67 @@ def parse_defaults(defaults: Mapping[str, str]) -> Mapping[int, str]:
     return col_defaults
 
 
+def merge_config(current, other):
+    current = current.copy()
+    for key, val in other.items():
+        if current.get(key) is None:
+            current[key] = val
+            continue
+        cval = current[key]
+        logger.debug('Merging key %s', key)
+        if isinstance(val, dict):
+            d = cval.copy()
+            d.update(val)
+            current[key] = d
+        elif isinstance(val, list):
+            current[key] = cval + val
+        elif isinstance(val, (str, int)):
+            logger.warning('Overwriting key %s' % key)
+            current[key] = val
+    return current
+
+
+def get_config(args):
+    col_formats, col_escapes = parse_formats(args.formats)
+    col_defaults = parse_defaults(args.defaults)
+    kwargs = {
+        'in_filename': args.file,
+        'row_xpath': args.rows,
+        'col_xpaths': args.cols,
+        'col_formats': col_formats,
+        'col_escapes': col_escapes,
+        'col_defaults': col_defaults,
+        'row_style': args.row_style,
+        'col_names': args.names,
+        'row_aligns': args.align,
+        'print_environment': args.print_environment,
+    }
+    if args.rows.startswith('auto:'):
+        del kwargs['row_xpath']
+        config_file = os.path.join(
+                os.path.split(os.path.realpath(__file__))[0],
+                'auto', args.rows[5:]) + '.py'
+        with open(config_file) as f:
+            code_str = f.read()
+            try:
+                config = eval(compile(code_str, config_file, 'eval'))
+            except SyntaxError:
+                l = {}
+                exec(compile(code_str, config_file, 'exec'), None, l)
+                if 'config' not in l:
+                    raise NameError('config not defined')
+                config = l['config']
+        kwargs = merge_config(kwargs, config)
+    n_cols = len(kwargs['col_xpaths'] or [])
+    if not all(
+            0 <= i < n_cols
+            for groups in (col_formats, col_escapes, col_defaults)
+            for i in groups
+            if i is not None):
+        raise ValueError('Invalid column number')
+    return kwargs
+
+
 def main():
     parser = argparse.ArgumentParser(
             description='Convert XML and XPath expressions to LaTeX tables')
@@ -223,9 +287,11 @@ def main():
             help='The file to import')
     parser.add_argument(
             'rows',
-            help='The XPath expression to select each row')
+            help='The XPath expression to select each row.\n'
+            'Alternatively, if it begins with "auto:", it specifies '
+            'a configuration file in the autoconfig directory.')
     parser.add_argument(
-            'cols', nargs='*', default=['text()'],
+            'cols', nargs='*',
             help='The XPath expressions relative to rows for each column. '
             'If none are provided, each row has one column. '
             'If the expression for a column is not a string, '
@@ -256,27 +322,8 @@ def main():
             '-r', '--row-style', default='%s',
             help='The text to insert before each row')
     args = parser.parse_args()
-    col_formats, col_escapes = parse_formats(args.formats)
-    col_defaults = parse_defaults(args.defaults)
-    n_cols = len(args.cols)
-    if not all(
-            0 <= i < n_cols
-            for groups in (col_formats, col_escapes, col_defaults)
-            for i in groups
-            if i is not None):
-        raise ValueError('Invalid column number')
-    output_xml(
-        in_filename=args.file,
-        row_xpath=args.rows,
-        col_xpaths=args.cols,
-        col_formats=col_formats,
-        col_escapes=col_escapes,
-        col_defaults=col_defaults,
-        row_style=args.row_style,
-        row_names=args.names,
-        row_aligns=args.align,
-        print_environment=args.print_environment,
-    )
+    kwargs = get_config(args)
+    output_xml(**kwargs)
 
 
 
