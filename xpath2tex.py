@@ -11,8 +11,8 @@ from lxml import etree
 # Typing
 import io
 from typing import Sequence, Mapping, Iterator, Generic, AbstractSet, Callable
-from typing import Any, List, Tuple, Dict, Generator
-from typing import TypeVar
+from typing import Any, List, Tuple, Dict
+from typing import TypeVar, Union
 from numbers import Number
 from lxml.etree import _Element as Element
 from lxml.etree import XPath
@@ -97,8 +97,13 @@ def ensure_str(item) -> str:
     return str(item)
 
 
-def query_row(row: Element, col_xpaths: Sequence[XPath]) -> List[str]:
-    return [ensure_str(xpath(row)) for xpath in col_xpaths]
+def query_row(
+        row: Element,
+        col_xpaths: Sequence[Sequence[XPath]]) -> List[str]:
+    return [
+        next(filter(None, (ensure_str(xpath(row)) for xpath in xpaths)), '')
+        for xpaths in col_xpaths
+    ]
 
 
 def replace_multiple(s: str, replaces: Sequence[Tuple[str, str]]) -> str:
@@ -139,7 +144,7 @@ def format_row(
 def enum_rows(
         in_file: io.TextIOBase,
         row_xpath: str,
-        col_xpaths: Sequence[str],
+        col_xpaths: Sequence[Union[str, Sequence[str]]],
         row_style: str='%s',
         sort_by: Tuple[int, Callable[[str], Any]]=None,
         skip_cols: AbstractSet[int]=set(),
@@ -147,7 +152,9 @@ def enum_rows(
         col_formats: Mapping[int, str]={},
         col_escapes: Mapping[int, bool]={}) -> Iterator[str]:
     row_xpath = XPath(row_xpath)
-    col_xpaths = [XPath(i) for i in col_xpaths]
+    col_xpaths = [
+            [XPath(i)] if isinstance(i, str) else [XPath(j) for j in i]
+            for i in col_xpaths]
     tree = etree.parse(in_file)
     row_cols = [
         query_row(row_element, col_xpaths)
@@ -174,7 +181,7 @@ def enum_rows(
 
 def output_xml(
         in_filename: str,
-        col_xpaths: Sequence[str],
+        col_xpaths: Sequence[Union[str, Sequence[str]]],
         out_file: io.TextIOBase=sys.stdout,
         col_names: Sequence[str]=None,
         row_aligns: Sequence[str]=None,
