@@ -10,7 +10,7 @@ from lxml import etree
 
 # Typing
 import io
-from typing import Sequence, Mapping, Iterator, Generic
+from typing import Sequence, Mapping, Iterator, Generic, AbstractSet
 from typing import Any, List, Tuple, Dict, Generator
 from typing import TypeVar
 from numbers import Number
@@ -118,13 +118,15 @@ def format_row(
         cols: Sequence[str],
         col_defaults: Mapping[int, str]={},
         col_formats: Mapping[int, str]={},
-        col_escapes: Mapping[int, bool]={}) -> str:
+        col_escapes: Mapping[int, bool]={},
+        skip_cols: AbstractSet[int]=set(),) -> str:
     return ' & '.join(
         format_item(
             col or col_defaults.get(n, ''),
             col_formats.get(n),
             col_escapes.get(n, True))
         for n, col in enumerate(cols)
+        if n not in skip_cols
     )
 
 
@@ -133,6 +135,7 @@ def enum_rows(
         row_xpath: str,
         col_xpaths: Sequence[str],
         row_style: str='%s',
+        skip_cols: AbstractSet[int]=set(),
         col_defaults: Mapping[int, str]={},
         col_formats: Mapping[int, str]={},
         col_escapes: Mapping[int, bool]={}) -> Iterator[str]:
@@ -146,6 +149,7 @@ def enum_rows(
             col_formats=col_formats,
             col_escapes=col_escapes,
             col_defaults=col_defaults,
+            skip_cols=skip_cols,
         )
 
 
@@ -156,21 +160,29 @@ def output_xml(
         col_names: Sequence[str]=None,
         row_aligns: Sequence[str]=None,
         print_environment: bool=False,
+        skip_cols: AbstractSet[int]=set(),
         **kwargs) -> None:
     if col_xpaths is None:
         col_xpaths = ['text()']
     if print_environment:
         if row_aligns is None:
-            row_aligns = 'l' * len(col_xpaths)
+            row_aligns = 'l' * (len(col_xpaths) - len(skip_cols))
         print(r'\begin{tabular}{%s}\toprule' % row_aligns, file=out_file)
     if col_names is not None:
         print(
             ' & '.join(
-                r'\textbf{%s}' % escape_tex(name) for name in col_names
+                r'\textbf{%s}' % escape_tex(name)
+                for n, name in enumerate(col_names)
+                if n not in skip_cols
             ) + r'\\\midrule',
             file=out_file)
     with open(in_filename) as f:
-        for row in enum_rows(in_filename, col_xpaths=col_xpaths, **kwargs):
+        rows = enum_rows(
+            in_filename,
+            col_xpaths=col_xpaths,
+            skip_cols=skip_cols,
+            **kwargs)
+        for row in rows:
             print(row + r' \\', file=out_file)
     if print_environment:
         print('\\bottomrule\n\\end{tabular}', file=out_file)
@@ -248,6 +260,7 @@ def get_config(args):
         'col_formats': col_formats,
         'col_escapes': col_escapes,
         'col_defaults': col_defaults,
+        'skip_cols': args.skip_cols,
         'row_style': args.row_style,
         'col_names': args.names,
         'row_aligns': args.align,
@@ -270,12 +283,14 @@ def get_config(args):
                 config = l['config']
         kwargs = merge_config(kwargs, config)
     n_cols = len(kwargs['col_xpaths'] or [])
-    if not all(
-            0 <= i < n_cols
+    invalid_col = next((
+            col
             for groups in (col_formats, col_escapes, col_defaults)
-            for i in groups
-            if i is not None):
-        raise ValueError('Invalid column number')
+            for col in groups
+            if col is not None and not 0 <= col < n_cols
+        ), None)
+    if invalid_col is not None:
+        raise ValueError('Invalid column number %d' % invalid_col)
     return kwargs
 
 
@@ -321,6 +336,10 @@ def main():
     parser.add_argument(
             '-r', '--row-style', default='%s',
             help='The text to insert before each row')
+    parser.add_argument(
+            '-s', '--skip-cols', default=[],
+            type=lambda s: [int(i) for i in s.split(',')],
+            help='Skip the specified columns in the output')
     args = parser.parse_args()
     kwargs = get_config(args)
     output_xml(**kwargs)
