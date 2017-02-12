@@ -7,6 +7,8 @@ import argparse
 import logging
 import itertools
 import collections.abc
+from collections import defaultdict
+
 from lxml import etree
 
 # Typing
@@ -42,9 +44,12 @@ KNOWN_FORMATS = {
     'bold': (r'\textbf{%s}', False),
 }
 
+EMPTY_ELEMENT = etree.Element('empty')
+
 SORTING_TRANSFORMS = {
     'ident': lambda x: x,
     'ip': lambda x: [int(i) for i in x.split('.')],
+    'port': lambda x: int(x.split('/')[0]) if x else -1
 }
 
 logger = logging.getLogger('xpath2tex')
@@ -101,23 +106,48 @@ def ensure_str(item) -> str:
 
 def query_row(
         row: Element,
-        col_xpaths: Sequence[Sequence[XPath]]) -> List[str]:
+        col_xpaths: Sequence[Sequence[XPath]],
+        col_relatives: Mapping[XPath, List[int]]) -> List[str]:
+    col_relatives = {
+        next(iter(xpath(row)), EMPTY_ELEMENT): cols
+        for xpath, cols in col_relatives.items()
+    }
+    rel = {
+        col: element
+        for element, cols in col_relatives.items()
+        for col in cols
+    }
     return [
-        next(filter(None, (ensure_str(xpath(row)) for xpath in xpaths)), '')
-        for xpaths in col_xpaths
+        next(filter(
+            None,
+            (ensure_str(xpath(rel.get(n, row))) for xpath in xpaths)),
+            '')
+        for n, xpaths in enumerate(col_xpaths)
     ]
 
 
 def query_row_group(
         row: Element,
         group: int,
-        col_xpaths: Sequence[Sequence[XPath]]) -> Tuple[List[str], List[List[str]]]:
+        col_xpaths: Sequence[Sequence[XPath]],
+        col_relatives: Mapping[XPath, List[int]]) -> Tuple[List[str], List[List[str]]]:
     grouped, non_grouped = col_xpaths[:group], col_xpaths[group:]
+    non_grouped_relative = {
+        tuple(xpath(row)): cols
+        for xpath, cols in col_relatives.items()
+    }
+    rel = {
+        col: element
+        for element, cols in non_grouped_relative.items()
+        for col in cols
+    }
     return (
-        query_row(row, grouped),
+        query_row(row, grouped, col_relatives),
         [
-            [ensure_str(result) for result in xpath(row)] or ['']
-            for xpaths in non_grouped
+            [ensure_str(result) for result in xpath(row)]
+            if n not in rel else
+            [ensure_str(xpath(rel_row)) for rel_row in rel[n]]
+            for n, xpaths in enumerate(non_grouped, group)
             for xpath in xpaths
         ]
     )
@@ -169,6 +199,7 @@ def format_row_group(
     assert len(group_cols) > 0
     assert len(non_group_cols) > 0
     n_rows = max(map(len, non_group_cols))
+    # print((group_cols, non_group_cols), file=sys.stderr)
     yield r'\multirow[t]{%d}{*}{%s} & %s' % (
         n_rows, group_cols[0], format_row(
             group_cols[1:] +
@@ -177,6 +208,7 @@ def format_row_group(
     for extra_row in itertools.islice(itertools.zip_longest(
             *non_group_cols, fillvalue=''), 1, None):
         yield format_row([''] * len(group_cols) + list(extra_row), **kwargs)
+    yield '\\midrule\n'
 
 
 def enum_rows(
@@ -187,21 +219,24 @@ def enum_rows(
         col_group: int=0,
         sort_by: Tuple[int, Callable[[str], Any]]=None,
         skip_cols: AbstractSet[int]=set(),
+        col_relatives: Mapping[str, List[int]]=None,
         col_defaults: Mapping[int, str]=None,
         col_formats: Mapping[int, str]=None,
         col_escapes: Mapping[int, bool]=None) -> Iterator[str]:
     col_defaults = col_defaults or {}
     col_formats = col_formats or {}
     col_escapes = col_escapes or {}
+    col_relatives = col_relatives or {}
     row_xpath = XPath(row_xpath)
     col_xpaths = [
             [XPath(i)] if isinstance(i, str) else [XPath(j) for j in i]
             for i in col_xpaths]
+    col_relatives = {XPath(k): v for k, v in col_relatives.items()}
     tree = etree.parse(in_file)
     if col_group > 0:
         for row_element in row_xpath(tree):
             group_cols, non_group_cols = query_row_group(
-                    row_element, col_group, col_xpaths)
+                    row_element, col_group, col_xpaths, col_relatives)
             yield from format_row_group(
                 group_cols=group_cols,
                 non_group_cols=non_group_cols,
@@ -213,7 +248,7 @@ def enum_rows(
             )
         return
     row_cols = [
-        query_row(row_element, col_xpaths)
+        query_row(row_element, col_xpaths, col_relatives)
         for row_element in row_xpath(tree)]
     if sort_by is not None:
         col_sort, translate = sort_by
@@ -231,7 +266,7 @@ def enum_rows(
             col_formats=col_formats,
             col_escapes=col_escapes,
             col_defaults=col_defaults,
-            skip_cols=skip_cols,
+            skip_cols=skip_cols
         )
 
 
@@ -305,12 +340,27 @@ def parse_defaults(defaults: Mapping[str, str]) -> Mapping[int, str]:
         m = expr.match(cols)
         if m is None:
             raise ValueError('Column expression %s invalid' % cols)
-        cols = [int(i) for i in m.groups()]
+        cols = [int(i) for i in m.group().split(',')]
         for col in cols:
             if col in col_defaults:
                 raise ValueError('Column %d default set more than once' % col)
             col_defaults[col] = text
     return col_defaults
+
+
+def parse_relatives(relatives: List[str]) -> Mapping[str, List[int]]:
+    if relatives is None:
+        return {}
+    col_relative = defaultdict(list)
+    expr = re.compile(r'^(\d+(?:,\d+)*):(.+)$')
+    for text in relatives:
+        m = expr.match(text)
+        if m is None:
+            raise ValueError('Column expression %s invalid' % cols)
+        cols, xpath = m.groups()
+        cols = [int(i) for i in cols.split(',')]
+        col_relative[xpath].extend(cols)
+    return dict(col_relative)
 
 
 def merge_config(current, other):
@@ -340,6 +390,7 @@ def merge_config(current, other):
 def get_config(args):
     col_formats, col_escapes = parse_formats(args.formats)
     col_defaults = parse_defaults(args.defaults)
+    col_relatives = parse_relatives(args.relatives)
     kwargs = {
         'in_filename': args.file,
         'row_xpath': args.rows,
@@ -350,6 +401,7 @@ def get_config(args):
         'skip_cols': args.skip_cols,
         'row_style': args.row_style,
         'col_names': args.names,
+        'col_relatives': col_relatives,
         'sort_by': args.sort_by,
         'row_aligns': args.align,
         'print_environment': args.print_environment,
@@ -434,6 +486,9 @@ def main():
             '! specifies to not escape the column.\n'
             'expr is a format expression where %%s is the data' +
             'name is one of: %s.\n' % ', '.join(KNOWN_FORMATS))
+    parser.add_argument(
+            '-l', '--relative', default=[], action='append', dest='relatives',
+            help='The given columns are relative to the given xpath')
     parser.add_argument(
            '-e', '--print-environment', action='store_true',
             help='Print the tabular environment')
