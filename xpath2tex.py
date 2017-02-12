@@ -5,14 +5,15 @@ import sys
 import os
 import argparse
 import logging
-import collections
+import collections.abc
 from lxml import etree
 
 # Typing
 import io
 from typing import Sequence, Mapping, Iterator, Generic, AbstractSet, Callable
-from typing import Any, List, Tuple, Dict
+from typing import Any, List, Tuple
 from typing import TypeVar, Union
+from typing.io import TextIO
 from numbers import Number
 from lxml.etree import _Element as Element
 from lxml.etree import XPath
@@ -127,10 +128,13 @@ def format_item(item: str, fmt: str=None, escape: bool=True) -> str:
 def format_row(
         cols: Sequence[str],
         row_style: str='%s',
-        col_defaults: Mapping[int, str]={},
-        col_formats: Mapping[int, str]={},
-        col_escapes: Mapping[int, bool]={},
+        col_defaults: Mapping[int, str]=None,
+        col_formats: Mapping[int, str]=None,
+        col_escapes: Mapping[int, bool]=None,
         skip_cols: AbstractSet[int]=set(),) -> Iterator[str]:
+    col_defaults = col_defaults or {}
+    col_formats = col_formats or {}
+    col_escapes = col_escapes or {}
     yield ' & '.join(
         format_item(
             col or col_defaults.get(n, ''),
@@ -142,15 +146,18 @@ def format_row(
 
 
 def enum_rows(
-        in_file: io.TextIOBase,
+        in_file: TextIO,
         row_xpath: str,
         col_xpaths: Sequence[Union[str, Sequence[str]]],
         row_style: str='%s',
         sort_by: Tuple[int, Callable[[str], Any]]=None,
         skip_cols: AbstractSet[int]=set(),
-        col_defaults: Mapping[int, str]={},
-        col_formats: Mapping[int, str]={},
-        col_escapes: Mapping[int, bool]={}) -> Iterator[str]:
+        col_defaults: Mapping[int, str]=None,
+        col_formats: Mapping[int, str]=None,
+        col_escapes: Mapping[int, bool]=None) -> Iterator[str]:
+    col_defaults = col_defaults or {}
+    col_formats = col_formats or {}
+    col_escapes = col_escapes or {}
     row_xpath = XPath(row_xpath)
     col_xpaths = [
             [XPath(i)] if isinstance(i, str) else [XPath(j) for j in i]
@@ -204,7 +211,7 @@ def output_xml(
             file=out_file)
     with open(in_filename) as f:
         rows = enum_rows(
-            in_filename,
+            f,
             col_xpaths=col_xpaths,
             skip_cols=skip_cols,
             **kwargs)
@@ -304,6 +311,7 @@ def get_config(args):
                 'auto', args.rows[5:]) + '.py'
         with open(config_file) as f:
             code_str = f.read()
+            config = {}
             try:
                 config = eval(compile(code_str, config_file, 'eval'))
             except SyntaxError:
