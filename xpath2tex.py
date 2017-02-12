@@ -243,13 +243,14 @@ def output_xml(
         row_aligns: Sequence[str]=None,
         print_environment: bool=False,
         skip_cols: AbstractSet[int]=set(),
+        environment_name: str='tabular',
         **kwargs) -> None:
     if col_xpaths is None:
         col_xpaths = ['text()']
     if print_environment:
         if row_aligns is None:
             row_aligns = 'l' * (len(col_xpaths) - len(skip_cols))
-        print(r'\begin{tabular}{%s}\toprule' % row_aligns, file=out_file)
+        print(r'\begin{%s}{%s}\toprule' % (environment_name, row_aligns), file=out_file)
     if col_names is not None:
         print(
             ' & '.join(
@@ -267,7 +268,7 @@ def output_xml(
         for row in rows:
             print(row, file=out_file)
     if print_environment:
-        print('\\bottomrule\n\\end{tabular}', file=out_file)
+        print('\\bottomrule\n\\end{%s}' % environment_name, file=out_file)
 
 
 def parse_formats(formats: List[str]) -> \
@@ -353,6 +354,7 @@ def get_config(args):
         'row_aligns': args.align,
         'print_environment': args.print_environment,
         'col_group': args.group,
+        'environment_name': args.environment_name,
     }
     if args.rows.startswith('auto:'):
         del kwargs['row_xpath']
@@ -435,6 +437,9 @@ def main():
     parser.add_argument(
            '-e', '--print-environment', action='store_true',
             help='Print the tabular environment')
+    parser.add_argument(
+            '--environment-name', default='tabular',
+            help='The name of the tabular environment')
     parser.add_argument(
             '-r', '--row-style', default='%s',
             help='The text to insert before each row')
