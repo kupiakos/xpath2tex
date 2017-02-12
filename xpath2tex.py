@@ -195,20 +195,35 @@ def format_row(
 def format_row_group(
         group_cols: List[str],
         non_group_cols: List[List[str]],
+        col_defaults: Mapping[int, str]=None,
+        col_formats: Mapping[int, str]=None,
+        col_escapes: Mapping[int, bool]=None,
+        is_last: bool=False,
+        skip_cols: AbstractSet[int]=set(),
         **kwargs) -> Iterator[str]:
     assert len(group_cols) > 0
     assert len(non_group_cols) > 0
     n_rows = max(map(len, non_group_cols))
     # print((group_cols, non_group_cols), file=sys.stderr)
     yield r'\multirow[t]{%d}{*}{%s} & %s' % (
-        n_rows, group_cols[0], format_row(
-            group_cols[1:] +
+        n_rows,
+        format_item(
+            group_cols[0] or col_defaults.get(0, ''),
+            col_formats.get(0),
+            col_escapes.get(0, True)),
+        format_row(
+            [''] + group_cols[1:] +
             [col_rows[0] if col_rows else '' for col_rows in non_group_cols],
+            col_defaults=col_defaults,
+            col_formats=col_formats,
+            col_escapes=col_escapes,
+            skip_cols=skip_cols | {0},
             **kwargs))
     for extra_row in itertools.islice(itertools.zip_longest(
             *non_group_cols, fillvalue=''), 1, None):
         yield format_row([''] * len(group_cols) + list(extra_row), **kwargs)
-    yield '\\midrule\n'
+    if not is_last:
+        yield '\\midrule\n'
 
 
 def enum_rows(
@@ -234,7 +249,8 @@ def enum_rows(
     col_relatives = {XPath(k): v for k, v in col_relatives.items()}
     tree = etree.parse(in_file)
     if col_group > 0:
-        for row_element in row_xpath(tree):
+        rows = row_xpath(tree)
+        for n, row_element in enumerate(rows):
             group_cols, non_group_cols = query_row_group(
                     row_element, col_group, col_xpaths, col_relatives)
             yield from format_row_group(
@@ -245,6 +261,7 @@ def enum_rows(
                 col_escapes=col_escapes,
                 col_defaults=col_defaults,
                 skip_cols=skip_cols,
+                is_last=n == len(rows) - 1
             )
         return
     row_cols = [
@@ -499,8 +516,8 @@ def main():
             '-r', '--row-style', default='%s',
             help='The text to insert before each row')
     parser.add_argument(
-            '-s', '--skip-cols', default=[],
-            type=lambda s: [int(i) for i in s.split(',')],
+            '-s', '--skip-cols', default=set(),
+            type=lambda s: {int(i) for i in s.split(',')},
             help='Skip the specified columns in the output')
     parser.add_argument(
             '--sort-by', type=parse_sort,
