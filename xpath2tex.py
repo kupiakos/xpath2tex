@@ -5,6 +5,7 @@ import sys
 import os
 import argparse
 import logging
+import itertools
 import collections.abc
 from lxml import etree
 
@@ -107,6 +108,21 @@ def query_row(
     ]
 
 
+def query_row_group(
+        row: Element,
+        group: int,
+        col_xpaths: Sequence[Sequence[XPath]]) -> Tuple[List[str], List[List[str]]]:
+    grouped, non_grouped = col_xpaths[:group], col_xpaths[group:]
+    return (
+        query_row(row, grouped),
+        [
+            [ensure_str(result) for result in xpath(row)] or ['']
+            for xpaths in non_grouped
+            for xpath in xpaths
+        ]
+    )
+
+
 def replace_multiple(s: str, replaces: Sequence[Tuple[str, str]]) -> str:
     for from_, to in replaces:
         s = s.replace(from_, to)
@@ -131,11 +147,12 @@ def format_row(
         col_defaults: Mapping[int, str]=None,
         col_formats: Mapping[int, str]=None,
         col_escapes: Mapping[int, bool]=None,
-        skip_cols: AbstractSet[int]=set(),) -> Iterator[str]:
+        col_group: int=None,
+        skip_cols: AbstractSet[int]=set(),) -> str:
     col_defaults = col_defaults or {}
     col_formats = col_formats or {}
     col_escapes = col_escapes or {}
-    yield ' & '.join(
+    return ' & '.join(
         format_item(
             col or col_defaults.get(n, ''),
             col_formats.get(n),
@@ -145,11 +162,29 @@ def format_row(
     ) + r' \\'
 
 
+def format_row_group(
+        group_cols: List[str],
+        non_group_cols: List[List[str]],
+        **kwargs) -> Iterator[str]:
+    assert len(group_cols) > 0
+    assert len(non_group_cols) > 0
+    n_rows = max(map(len, non_group_cols))
+    yield r'\multirow[t]{%d}{*}{%s} & %s' % (
+        n_rows, group_cols[0], format_row(
+            group_cols[1:] +
+            [col_rows[0] if col_rows else '' for col_rows in non_group_cols],
+            **kwargs))
+    for extra_row in itertools.islice(itertools.zip_longest(
+            *non_group_cols, fillvalue=''), 1, None):
+        yield format_row([''] * len(group_cols) + list(extra_row), **kwargs)
+
+
 def enum_rows(
         in_file: TextIO,
         row_xpath: str,
         col_xpaths: Sequence[Union[str, Sequence[str]]],
         row_style: str='%s',
+        col_group: int=0,
         sort_by: Tuple[int, Callable[[str], Any]]=None,
         skip_cols: AbstractSet[int]=set(),
         col_defaults: Mapping[int, str]=None,
@@ -163,6 +198,20 @@ def enum_rows(
             [XPath(i)] if isinstance(i, str) else [XPath(j) for j in i]
             for i in col_xpaths]
     tree = etree.parse(in_file)
+    if col_group > 0:
+        for row_element in row_xpath(tree):
+            group_cols, non_group_cols = query_row_group(
+                    row_element, col_group, col_xpaths)
+            yield from format_row_group(
+                group_cols=group_cols,
+                non_group_cols=non_group_cols,
+                row_style=row_style,
+                col_formats=col_formats,
+                col_escapes=col_escapes,
+                col_defaults=col_defaults,
+                skip_cols=skip_cols,
+            )
+        return
     row_cols = [
         query_row(row_element, col_xpaths)
         for row_element in row_xpath(tree)]
@@ -176,7 +225,7 @@ def enum_rows(
                 key=lambda cols: translate(ensure_str(cols[col_sort])),
                 reverse=reverse)
     for cols in row_cols:
-        yield from format_row(
+        yield format_row(
             cols=cols,
             row_style=row_style,
             col_formats=col_formats,
@@ -303,6 +352,7 @@ def get_config(args):
         'sort_by': args.sort_by,
         'row_aligns': args.align,
         'print_environment': args.print_environment,
+        'col_group': args.group,
     }
     if args.rows.startswith('auto:'):
         del kwargs['row_xpath']
@@ -368,6 +418,9 @@ def main():
             nargs=2, metavar=('COLS', 'TEXT'), default=[],
             help='Set the default value for one or all columns.\n'
             'COLS:=n[,n]')
+    parser.add_argument(
+            '-g', '--group', default=0, type=int,
+            help='Group the first n columns together')
     parser.add_argument(
             '-n', '--names', type=lambda s: s.split(','),
             help='Names of each of the columns, comma separated')
